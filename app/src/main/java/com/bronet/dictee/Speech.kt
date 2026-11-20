@@ -2,21 +2,18 @@ package com.bronet.dictee
 
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 
 /**
- * Dictée « maintenir pour parler » : écoute tant que la touche est tenue, quelle que soit
- * la longueur, et ne termine qu'au relâchement.
- *
- * - Android 13+ : session segmentée (écoute continue, un segment livré à chaque pause).
- * - Sinon, ou si le service vocal ne la prend pas en charge : relance immédiate après
- *   chaque pause ou erreur passagère, tant que la touche est tenue.
+ * Dictée « maintenir pour parler » : écoute tant que la touche est tenue et ne termine
+ * qu'au relâchement. Après chaque pause, le service vocal ferme sa session : on la relance
+ * aussitôt, sans jamais abandonner tant que la touche est tenue.
  */
 class Dictation(private val ctx: Context) {
 
@@ -24,6 +21,8 @@ class Dictation(private val ctx: Context) {
         fun onPartial(text: String)
         fun onSegment(text: String)
         fun onEnd(error: String?)
+        /** Problème passager pendant l'appui (affiché, l'écoute continue de réessayer). */
+        fun onTrouble(message: String) {}
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -35,24 +34,23 @@ class Dictation(private val ctx: Context) {
     private var ready = false
     private var listening = false
     private var lastPartial = ""
-    private var gotSomething = false   // résultat reçu dans la session en cours
-    private var failures = 0           // erreurs consécutives sans aucun résultat
-
-    /** Mode segmenté : essayé sur Android 13+, abandonné si le service vocal le refuse. */
-    private var segmented = Build.VERSION.SDK_INT >= 33
+    private var failures = 0          // erreurs consécutives sans aucun texte
+    private var lastStart = 0L
 
     fun available() = SpeechRecognizer.isRecognitionAvailable(ctx)
     fun isActive() = active
 
     fun start(languageTag: String, callbacks: Callbacks) {
         cancel()
-        recreate()   // moteur neuf : aucun rappel tardif de la prise précédente
         tag = languageTag
         cb = callbacks
         active = true
         released = false
         failures = 0
-        begin()
+        // Laisser au service le temps de libérer la session précédente.
+        val since = SystemClock.elapsedRealtime() - lastStart
+        if (since < 300) handler.postDelayed({ if (active && !released) begin() }, 300 - since)
+        else begin()
     }
 
     /** La touche est relâchée : terminer proprement et livrer le dernier segment. */
@@ -63,7 +61,7 @@ class Dictation(private val ctx: Context) {
         if (listening) {
             if (ready) try { rec?.stopListening() } catch (_: Exception) {}
             // Filet de sécurité : si le service ne répond pas, livrer ce qu'on a.
-            handler.postDelayed({ if (active) { flushPartial(); finish(null) } }, 5000)
+            handler.postDelayed({ if (active) { flushPartial(); finish(null) } }, 4000)
         } else {
             flushPartial()
             finish(null)
@@ -84,17 +82,12 @@ class Dictation(private val ctx: Context) {
         rec = null
     }
 
-    private fun recreate() {
-        try { rec?.destroy() } catch (_: Exception) {}
-        rec = null
-    }
-
     private fun begin() {
-        if (!active) return
+        if (!active || released) return
         ready = false
         listening = true
         lastPartial = ""
-        gotSomething = false
+        lastStart = SystemClock.elapsedRealtime()
         val recognizer = rec ?: SpeechRecognizer.createSpeechRecognizer(ctx).also {
             it.setRecognitionListener(Listener(it))
             rec = it
@@ -105,64 +98,47 @@ class Dictation(private val ctx: Context) {
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ctx.packageName)
-            // Tolérer de longues pauses (ignoré par certains services, sans effet néfaste).
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 10_000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 10_000L)
-            if (segmented) {
-                // Session continue jusqu'à 1 h ou jusqu'au relâchement (stopListening).
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 3_600_000L)
-                putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION,
-                    RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS)
-            }
         }
         try {
             recognizer.startListening(intent)
         } catch (e: Exception) {
-            listening = false
-            retry(400, recreate = true, err = "Reconnaissance vocale indisponible : " + (e.message ?: "erreur"))
+            retry(ERR_START, "Reconnaissance vocale indisponible : " + (e.message ?: "erreur"))
         }
     }
 
-    /** Fin normale d'une session (pause, fin de segment) : relancer si la touche est tenue. */
+    /** Fin normale d'une session (pause) : relancer si la touche est tenue. */
     private fun next() {
         listening = false
         if (active && !released) {
-            handler.postDelayed({ if (active && !released) begin() }, 80)
+            handler.postDelayed({ if (active && !released) begin() }, 150)
         } else {
             finish(null)
         }
     }
 
     /**
-     * Erreur passagère : relancer tant que la touche est tenue, sans jamais abandonner
-     * (seul le relâchement termine). Les relances s'espacent si les échecs se répètent.
+     * Erreur passagère : relancer tant que la touche est tenue, sans abandonner.
+     * Les relances s'espacent (jusqu'à 2 s) pour ne pas saturer le service ;
+     * après plusieurs échecs, le moteur est recréé.
      */
-    @Suppress("UNUSED_PARAMETER")
-    private fun retry(delayMs: Long, recreate: Boolean = false, err: String? = null) {
+    private fun retry(code: Int, msg: String) {
         listening = false
         if (!active) return
         if (released) { flushPartial(); finish(null); return }
         failures++
-        val wait = minOf(delayMs * (1 + failures / 3), 2000L)
-        if (recreate || failures % 5 == 0) recreate()
+        if (failures >= 2) cb?.onTrouble("$msg — nouvel essai… (code $code)")
+        var wait = minOf(300L * failures, 2000L)
+        if (failures % 4 == 0 || code == SpeechRecognizer.ERROR_SERVER_DISCONNECTED) {
+            try { rec?.destroy() } catch (_: Exception) {}
+            rec = null
+            wait = maxOf(wait, 1000L)
+        }
         handler.postDelayed({ if (active && !released) begin() }, wait)
     }
 
     private fun flushPartial() {
         if (lastPartial.isNotBlank()) cb?.onSegment(lastPartial.trim())
         lastPartial = ""
-        cb?.onPartial("")
-    }
-
-    private fun deliver(results: Bundle?) {
-        var t = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
-        if (t.isBlank()) t = lastPartial
-        lastPartial = ""
-        if (t.isNotBlank()) {
-            gotSomething = true
-            failures = 0
-            cb?.onSegment(t.trim())
-        }
         cb?.onPartial("")
     }
 
@@ -175,7 +151,7 @@ class Dictation(private val ctx: Context) {
         c?.onEnd(error)
     }
 
-    /** Rappels liés à un moteur précis : ceux d'un ancien moteur sont ignorés. */
+    /** Rappels liés à un moteur précis : ceux d'un ancien moteur détruit sont ignorés. */
     private inner class Listener(private val owner: SpeechRecognizer) : RecognitionListener {
         private fun mine() = rec === owner && active
 
@@ -200,50 +176,32 @@ class Dictation(private val ctx: Context) {
             }
         }
 
-        // Mode segmenté : un segment par pause, la session continue.
-        override fun onSegmentResults(segmentResults: Bundle) {
-            if (mine()) deliver(segmentResults)
-        }
-
-        override fun onEndOfSegmentedSession() {
-            if (!mine()) return
-            flushPartial()
-            next()
-        }
-
         override fun onResults(results: Bundle?) {
             if (!mine()) return
-            deliver(results)
+            var t = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+            if (t.isBlank()) t = lastPartial
+            lastPartial = ""
+            if (t.isNotBlank()) { failures = 0; cb?.onSegment(t.trim()) }
+            cb?.onPartial("")
             next()
         }
 
         override fun onError(error: Int) {
             if (!mine()) return
-            val keepGoing = !released
             when (error) {
+                // Silence : ce n'est pas un échec, on continue d'écouter.
                 SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-                    // Silence : ce n'est pas un échec, on continue d'écouter.
-                    flushPartial()
-                    if (gotSomething) failures = 0
-                    next()
+                    flushPartial(); next()
                 }
+                // Erreurs bloquantes : inutile de réessayer.
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS,
                 SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
                 SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> { flushPartial(); finish(message(error)) }
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> {
                     try { rec?.cancel() } catch (_: Exception) {}
-                    flushPartial(); retry(300)
+                    flushPartial(); retry(error, "Service vocal occupé")
                 }
-                SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> { flushPartial(); retry(300, recreate = true, err = message(error)) }
-                SpeechRecognizer.ERROR_CLIENT -> {
-                    // Souvent renvoyée par un service qui refuse la session segmentée.
-                    if (segmented && !gotSomething && keepGoing) segmented = false
-                    flushPartial(); retry(150, recreate = true)
-                }
-                else -> {
-                    if (segmented && !gotSomething && keepGoing && failures >= 1) segmented = false
-                    flushPartial(); retry(400, err = message(error))
-                }
+                else -> { flushPartial(); retry(error, message(error)) }
             }
         }
     }
@@ -253,10 +211,13 @@ class Dictation(private val ctx: Context) {
         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Autorise le microphone pour Bronet Dictée."
         SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
             "Réseau indisponible pour la reconnaissance vocale. Télécharge le pack de langue hors ligne dans les réglages vocaux Google."
-        SpeechRecognizer.ERROR_SERVER -> "Le service vocal a refusé la demande. Réessaie."
-        SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> "Le service vocal s'est arrêté. Réessaie."
+        SpeechRecognizer.ERROR_SERVER -> "Le service vocal a refusé la demande."
+        SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> "Le service vocal s'est arrêté."
+        SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> "Trop de demandes au service vocal."
         12 -> "Cette langue n'est pas prise en charge par la reconnaissance vocale de la tablette."
         13 -> "Pack vocal manquant : Réglages › Gestion générale › Langue › Saisie vocale Google › Langues hors connexion."
-        else -> "Reconnaissance vocale interrompue (code $code)."
+        else -> "Reconnaissance vocale interrompue"
     }
+
+    private companion object { const val ERR_START = -1 }
 }

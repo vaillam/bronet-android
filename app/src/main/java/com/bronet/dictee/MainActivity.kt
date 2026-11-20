@@ -381,7 +381,11 @@ class MainActivity : Activity() {
         }
         holding = true
         speech.start(tag, object : Dictation.Callbacks {
-            override fun onPartial(text: String) = ui { partial.text = if (text.isEmpty()) "" else "… $text" }
+            override fun onPartial(text: String) = ui {
+                partial.text = if (text.isEmpty()) "" else "… $text"
+                if (text.isNotEmpty() && holding) setStatus("● J'écoute… relâche la touche pour terminer.")
+            }
+            override fun onTrouble(message: String) = ui { if (holding && curMode == mode) setStatus("⚠ $message") }
             override fun onSegment(text: String) = ui {
                 if (buf.isNotEmpty()) buf.append(' ')
                 buf.append(text)
