@@ -68,6 +68,9 @@ class MainActivity : Activity() {
     private lateinit var convSpeak: CheckBox
     private lateinit var autoCopy: CheckBox
     private lateinit var speakResult: CheckBox
+    private lateinit var journal: TextView
+    private var toggleMode = false   // appuyer pour commencer, appuyer pour terminer
+    private var journalStart = 0L
     private var lastOutput = ""
     private var lastOutputLang: Lang? = null
 
@@ -88,7 +91,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("bronet", Context.MODE_PRIVATE)
         ChatGpt.init(this)
-        speech = Dictation(this)
+        speech = Dictation(this).also { it.log = { m -> jlog(m) } }
         voice = Voice(this)
         dictLang = Lang.byKey(prefs.getString("dict", null), "fr")
         trSrc = Lang.byKey(prefs.getString("trSrc", null), "fr")
@@ -98,7 +101,8 @@ class MainActivity : Activity() {
         gptMode = prefs.getBoolean("gpt", false)
         buildUi()
         if (!speech.available()) setStatus("Reconnaissance vocale absente : installe/active « Services vocaux Google ».")
-        else setStatus("Prêt. Maintiens une touche en bas de l'écran pour parler, relâche pour terminer.")
+        else setStatus(if (toggleMode) "Prêt. Touche une touche en bas de l'écran pour parler, touche-la de nouveau pour terminer."
+            else "Prêt. Maintiens une touche en bas de l'écran pour parler, relâche pour terminer.")
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
     }
@@ -118,7 +122,7 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, results: IntArray) {
         super.onRequestPermissionsResult(code, perms, results)
-        if (results.isNotEmpty() && results[0] == PackageManager.PERMISSION_GRANTED) setStatus("Micro autorisé. Maintiens une touche pour parler.")
+        if (results.isNotEmpty() && results[0] == PackageManager.PERMISSION_GRANTED) setStatus(if (toggleMode) "Micro autorisé. Touche une touche pour parler." else "Micro autorisé. Maintiens une touche pour parler.")
         else setStatus("Micro refusé : Réglages › Applications › Bronet Dictée › Autorisations › Microphone.")
     }
 
@@ -192,13 +196,24 @@ class MainActivity : Activity() {
                 when (ev.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         v.parent?.requestDisallowInterceptTouchEvent(true)
+                        jlog("doigt posé sur la touche")
+                        if (toggleMode) {
+                            // Mode appuyer-appuyer : 1er appui = écoute, 2e appui = fin.
+                            if (curMode == mode) endHold(mode) else beginHold(mode, this, text, color)
+                        }
                         // Après un appui interrompu par la tablette, on touche de nouveau pour terminer.
-                        if (curMode == mode && holdCancelled) holdCancelled = false
+                        else if (curMode == mode && holdCancelled) holdCancelled = false
                         else beginHold(mode, this, text, color)
                         true
                     }
-                    MotionEvent.ACTION_UP -> { endHold(mode); true }
+                    MotionEvent.ACTION_UP -> {
+                        jlog("doigt levé (signalé par l'écran)")
+                        if (!toggleMode) endHold(mode)
+                        true
+                    }
                     MotionEvent.ACTION_CANCEL -> {
+                        jlog("appui annulé par la tablette")
+                        if (toggleMode) return@setOnTouchListener true
                         // La tablette a « volé » l'appui (geste système, bord d'écran…) alors que
                         // le doigt est peut-être encore posé : on continue d'écouter.
                         if (curMode == mode) {
@@ -232,11 +247,21 @@ class MainActivity : Activity() {
                 if (on && !ChatGpt.sharing()) { setStatus("Connecte d'abord ton compte ChatGPT."); showAccount() }
             }
         }
+        toggleMode = prefs.getBoolean("toggle", false)
+        val toggle = Switch(this).apply {
+            text = "Appuyer pour commencer, appuyer pour terminer (sans garder le doigt)"; isChecked = toggleMode; textSize = 15f
+            setOnCheckedChangeListener { _, on ->
+                if (curMode != null) { speech.cancel(); resetHoldUi() }
+                toggleMode = on; prefs.edit().putBoolean("toggle", on).apply()
+                refreshHoldLabels()
+            }
+        }
         col.addView(card(
             row(
                 button("Compte ChatGPT", PURPLE) { showAccount() },
                 button("Conversation", GREEN) { showConversation(true) },
             ), gpt.also { it.setPadding(0, dp(10), 0, 0) },
+            toggle.also { it.setPadding(0, dp(10), 0, 0) },
         ))
 
         // langues
@@ -296,6 +321,12 @@ class MainActivity : Activity() {
             ),
         ))
 
+        journal = label("", 12f, color = GREY).apply { typeface = Typeface.MONOSPACE; setTextIsSelectable(true) }
+        col.addView(card(
+            label("Journal de la dernière écoute (diagnostic)", 14f, true), journal,
+            row(button("Copier le journal", GREY) { copy(journal.text.toString()) }),
+        ))
+
         mainScroll = ScrollView(this).apply {
             isFillViewport = false
             addView(FrameLayout(this@MainActivity).apply {
@@ -312,13 +343,7 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 29) mainBar.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
             v.systemGestureExclusionRects = listOf(Rect(0, 0, v.width, v.height))
         }
-        listOf(
-            Triple("1 · DICTER\nmaintenir et parler", BLUE, Mode.DICT),
-            Triple("2 · TRADUIRE\nmaintenir et parler", GREEN, Mode.TRANS),
-            Triple("3 · DEMANDER À L'IA\nmaintenir et parler", PURPLE, Mode.ASK),
-        ).forEach { (t, c, m) ->
-            mainBar.addView(holdKey(t, c, m), LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(8) })
-        }
+        refreshHoldLabels()
 
         // ----- conversation
         convLog = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(8), dp(8), dp(8), dp(8)) }
@@ -357,11 +382,26 @@ class MainActivity : Activity() {
         setContentView(root)
     }
 
+    private fun holdHint() = if (toggleMode) "toucher pour parler" else "maintenir et parler"
+
+    /** (Re)construit les touches de la barre principale selon le mode choisi. */
+    private fun refreshHoldLabels() {
+        mainBar.removeAllViews()
+        listOf(
+            Triple("1 · DICTER\n${holdHint()}", BLUE, Mode.DICT),
+            Triple("2 · TRADUIRE\n${holdHint()}", GREEN, Mode.TRANS),
+            Triple("3 · DEMANDER À L'IA\n${holdHint()}", PURPLE, Mode.ASK),
+        ).forEach { (t, c, m) ->
+            mainBar.addView(holdKey(t, c, m), LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(8) })
+        }
+        if (::convBar.isInitialized) refreshConvBar()
+    }
+
     private fun refreshConvBar() {
         convBar.removeAllViews()
-        convBar.addView(holdKey("🎤 ${convA.label}\nmaintenir et parler", BLUE, Mode.CONV_A),
+        convBar.addView(holdKey("🎤 ${convA.label}\n${holdHint()}", BLUE, Mode.CONV_A),
             LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(8) })
-        convBar.addView(holdKey("🎤 ${convB.label}\nmaintenir et parler", GREEN, Mode.CONV_B),
+        convBar.addView(holdKey("🎤 ${convB.label}\n${holdHint()}", GREEN, Mode.CONV_B),
             LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(8) })
     }
 
@@ -391,9 +431,11 @@ class MainActivity : Activity() {
         voice.stop()
         curMode = mode; curButton = b; curLabel = text; curColor = color
         holdStart = System.currentTimeMillis(); buf.setLength(0)
-        b.text = "● J'écoute…\nrelâche pour terminer"
+        journalStart = holdStart; journal.text = ""
+        jlog("début de l'écoute (${if (toggleMode) "mode appuyer-appuyer" else "maintenir"})")
+        b.text = if (toggleMode) "● J'écoute…\ntouche pour terminer" else "● J'écoute…\nrelâche pour terminer"
         b.background = rounded(RED, 18)
-        setStatus("● J'écoute… relâche la touche pour terminer.")
+        setStatus(endHint())
         val tag = when (mode) {
             Mode.DICT, Mode.ASK -> dictLang.speech
             Mode.TRANS -> trSrc.speech
@@ -404,7 +446,7 @@ class MainActivity : Activity() {
         speech.start(tag, object : Dictation.Callbacks {
             override fun onPartial(text: String) = ui {
                 partial.text = if (text.isEmpty()) "" else "… $text"
-                if (text.isNotEmpty() && holding) setStatus("● J'écoute… relâche la touche pour terminer.")
+                if (text.isNotEmpty() && holding) setStatus(endHint())
             }
             override fun onTrouble(message: String) = ui { if (holding && curMode == mode) setStatus("⚠ $message") }
             override fun onSegment(text: String) = ui {
@@ -418,7 +460,7 @@ class MainActivity : Activity() {
                     // Règle absolue : tant que le doigt est sur la touche, jamais de traduction.
                     // Le service vocal s'est arrêté : on relance l'écoute en gardant le texte.
                     val cb = this
-                    if (error != null) setStatus("⚠ $error — j'écoute encore, relâche la touche pour terminer.")
+                    if (error != null) setStatus("⚠ $error — j'écoute encore. " + endHint())
                     mainBar.postDelayed({ if (holding && curMode == mode) speech.start(tag, cb) },
                         if (error == null) 0L else 1500L)
                 } else finishHold(mode, error)
@@ -433,7 +475,8 @@ class MainActivity : Activity() {
             speech.cancel(); resetHoldUi(); setStatus("Touche relâchée trop vite : maintiens-la pendant que tu parles."); return
         }
         val secs = (System.currentTimeMillis() - holdStart) / 100 / 10.0
-        Toast.makeText(this, "Fin de l'écoute : touche relâchée après ${"%.1f".format(secs)} s", Toast.LENGTH_SHORT).show()
+        jlog("fin demandée par l'utilisateur")
+        Toast.makeText(this, "Fin de l'écoute après ${"%.1f".format(secs)} s", Toast.LENGTH_SHORT).show()
         setStatus("Traitement…")
         if (speech.isActive()) speech.release() else finishHold(mode, null)
     }
@@ -444,8 +487,20 @@ class MainActivity : Activity() {
         if (::partial.isInitialized) partial.text = ""
     }
 
+    private fun endHint() = if (toggleMode) "● J'écoute… touche de nouveau la touche pour terminer."
+        else "● J'écoute… relâche la touche pour terminer."
+
+    /** Ajoute une ligne horodatée au journal de diagnostic. */
+    private fun jlog(msg: String) = ui {
+        if (!::journal.isInitialized) return@ui
+        val t = if (journalStart == 0L) 0.0 else (System.currentTimeMillis() - journalStart) / 100 / 10.0
+        val lines = (journal.text.toString().lines().filter { it.isNotBlank() } + "+${"%.1f".format(t)} s  $msg").takeLast(80)
+        journal.text = lines.joinToString("\n")
+    }
+
     private fun finishHold(mode: Mode, error: String?) {
         if (curMode != mode) return
+        jlog("traitement du texte (${buf.length} caractères)")
         resetHoldUi()
         val text = buf.toString().trim()
         if (text.isEmpty()) { setStatus(error ?: "Aucune parole reconnue. Réessaie plus près du micro."); return }

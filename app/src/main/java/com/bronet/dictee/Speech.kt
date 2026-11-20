@@ -26,6 +26,8 @@ class Dictation(private val ctx: Context) {
     }
 
     private val handler = Handler(Looper.getMainLooper())
+    /** Journal de diagnostic (affiché à l'écran). */
+    var log: (String) -> Unit = {}
     private var rec: SpeechRecognizer? = null
     private var cb: Callbacks? = null
     private var tag = "fr-CA"
@@ -59,6 +61,7 @@ class Dictation(private val ctx: Context) {
     fun release() {
         if (!active) return
         released = true
+        log("arrêt demandé (écoute en cours : $listening)")
         handler.removeCallbacksAndMessages(null)   // annule une relance en attente
         if (listening) {
             if (ready) try { rec?.stopListening() } catch (_: Exception) {}
@@ -90,6 +93,7 @@ class Dictation(private val ctx: Context) {
         listening = true
         lastPartial = ""
         lastStart = SystemClock.elapsedRealtime()
+        log("micro : démarrage de l'écoute (bip)")
         val recognizer = rec ?: SpeechRecognizer.createSpeechRecognizer(ctx).also {
             it.setRecognitionListener(Listener(it))
             rec = it
@@ -128,6 +132,7 @@ class Dictation(private val ctx: Context) {
         if (!active) return
         if (released) { flushPartial(); finish(null); return }
         failures++
+        log("nouvel essai n° $failures après erreur $code")
         if (failures >= 2) cb?.onTrouble("$msg — nouvel essai… (code $code)")
         var wait = minOf(300L * failures, 2000L)
         if (failures % 4 == 0 || code == SpeechRecognizer.ERROR_SERVER_DISCONNECTED) {
@@ -146,6 +151,7 @@ class Dictation(private val ctx: Context) {
 
     private fun finish(error: String?) {
         val c = cb
+        log("écoute terminée" + (error?.let { " : $it" } ?: ""))
         active = false
         listening = false
         cb = null
@@ -159,13 +165,14 @@ class Dictation(private val ctx: Context) {
 
         override fun onReadyForSpeech(params: Bundle?) {
             if (!mine()) return
+            log("micro prêt")
             ready = true
             if (released) try { rec?.stopListening() } catch (_: Exception) {}
         }
-        override fun onBeginningOfSpeech() {}
+        override fun onBeginningOfSpeech() { if (mine()) log("parole détectée") }
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
-        override fun onEndOfSpeech() {}
+        override fun onEndOfSpeech() { if (mine()) log("fin de parole (pause)") }
         override fun onEvent(eventType: Int, params: Bundle?) {}
 
         override fun onPartialResults(partialResults: Bundle?) {
@@ -182,6 +189,7 @@ class Dictation(private val ctx: Context) {
         override fun onResults(results: Bundle?) {
             if (!mine()) return
             var t = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+            log("résultat : ${t.length} caractères")
             if (t.isBlank()) t = lastPartial
             lastPartial = ""
             if (t.isNotBlank()) { failures = 0; heard = true; cb?.onSegment(t.trim()) }
@@ -191,6 +199,7 @@ class Dictation(private val ctx: Context) {
 
         override fun onError(error: Int) {
             if (!mine()) return
+            log("erreur du service vocal : code $error")
             when (error) {
                 // Silence : ce n'est pas un échec, on continue d'écouter.
                 SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
