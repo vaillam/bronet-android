@@ -1,0 +1,48 @@
+name: Compiler l'APK Android
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Compiler
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Nommer l'APK
+        run: cp app/build/outputs/apk/release/app-release.apk Bronet-Dictee.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bronet-Dictee-APK
+          path: Bronet-Dictee.apk
+
+      # Lien stable pour Downloader :
+      # https://github.com/<utilisateur>/<depot>/releases/latest/download/Bronet-Dictee.apk
+      - name: Publier
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-latest
+          name: Bronet Dictée Android
+          body: APK à installer sur la tablette Samsung (voir LISEZ-MOI-ANDROID.md).
+          files: Bronet-Dictee.apk
+          make_latest: true
