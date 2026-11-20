@@ -33,6 +33,7 @@ class Dictation(private val ctx: Context) {
     private var tag = "fr-CA"
     private var active = false
     private var released = false
+    private var releasing = false     // touche relâchée, on écoute encore un peu
     private var ready = false
     private var listening = false
     private var lastPartial = ""
@@ -49,6 +50,7 @@ class Dictation(private val ctx: Context) {
         cb = callbacks
         active = true
         released = false
+        releasing = false
         failures = 0
         heard = false
         // Laisser au service le temps de libérer la session précédente.
@@ -57,9 +59,19 @@ class Dictation(private val ctx: Context) {
         else begin()
     }
 
-    /** La touche est relâchée : terminer proprement et livrer le dernier segment. */
+    /**
+     * La touche est relâchée : continuer d'écouter encore [GRACE_MS] ms pour ne pas couper
+     * le dernier mot, puis terminer proprement et livrer le dernier segment.
+     */
     fun release() {
-        if (!active) return
+        if (!active || releasing || released) return
+        releasing = true
+        log("touche relâchée : j'écoute encore ${GRACE_MS / 1000} s pour finir le dernier mot")
+        handler.postDelayed({ stopNow() }, GRACE_MS)
+    }
+
+    private fun stopNow() {
+        if (!active || released) return
         released = true
         log("arrêt demandé (écoute en cours : $listening)")
         handler.removeCallbacksAndMessages(null)   // annule une relance en attente
@@ -236,5 +248,8 @@ class Dictation(private val ctx: Context) {
         else -> "Reconnaissance vocale interrompue"
     }
 
-    private companion object { const val ERR_START = -1 }
+    private companion object {
+        const val ERR_START = -1
+        const val GRACE_MS = 2000L
+    }
 }

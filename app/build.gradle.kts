@@ -11,8 +11,8 @@ android {
         applicationId = "com.bronet.dictee"
         minSdk = 26
         targetSdk = 34
-        versionCode = 165
-        versionName = "165-android"
+        versionCode = 166
+        versionName = "166-android"
     }
 
     buildTypes {
