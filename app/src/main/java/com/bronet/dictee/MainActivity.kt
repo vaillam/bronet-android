@@ -477,7 +477,7 @@ class MainActivity : Activity() {
         val secs = (System.currentTimeMillis() - holdStart) / 100 / 10.0
         jlog("fin demandée par l'utilisateur")
         Toast.makeText(this, "Fin de l'écoute après ${"%.1f".format(secs)} s", Toast.LENGTH_SHORT).show()
-        setStatus(if (speech.isActive()) "Je finis d'écouter (2 s)…" else "Traitement…")
+        setStatus("Traitement…")
         if (speech.isActive()) speech.release() else finishHold(mode, null)
     }
 
