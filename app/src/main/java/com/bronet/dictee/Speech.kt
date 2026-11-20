@@ -133,15 +133,19 @@ class Dictation(private val ctx: Context) {
         }
     }
 
-    /** Erreur passagère : relancer tant que la touche est tenue, sauf échecs répétés. */
+    /**
+     * Erreur passagère : relancer tant que la touche est tenue, sans jamais abandonner
+     * (seul le relâchement termine). Les relances s'espacent si les échecs se répètent.
+     */
+    @Suppress("UNUSED_PARAMETER")
     private fun retry(delayMs: Long, recreate: Boolean = false, err: String? = null) {
         listening = false
         if (!active) return
         if (released) { flushPartial(); finish(null); return }
         failures++
-        if (failures > 12) { flushPartial(); finish(err ?: "Reconnaissance vocale instable : réessaie."); return }
-        if (recreate) recreate()
-        handler.postDelayed({ if (active && !released) begin() }, delayMs)
+        val wait = minOf(delayMs * (1 + failures / 3), 2000L)
+        if (recreate || failures % 5 == 0) recreate()
+        handler.postDelayed({ if (active && !released) begin() }, wait)
     }
 
     private fun flushPartial() {

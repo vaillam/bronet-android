@@ -74,6 +74,7 @@ class MainActivity : Activity() {
     private var curLabel = ""
     private var curColor = BLUE
     private var holdStart = 0L
+    private var holding = false   // la touche est physiquement tenue
     private val buf = StringBuilder()
 
     private var accountDialog: AlertDialog? = null
@@ -378,6 +379,7 @@ class MainActivity : Activity() {
             Mode.CONV_A -> convA.speech
             Mode.CONV_B -> convB.speech
         }
+        holding = true
         speech.start(tag, object : Dictation.Callbacks {
             override fun onPartial(text: String) = ui { partial.text = if (text.isEmpty()) "" else "… $text" }
             override fun onSegment(text: String) = ui {
@@ -385,12 +387,18 @@ class MainActivity : Activity() {
                 buf.append(text)
                 if (mode == Mode.DICT) appendDictation(text)
             }
-            override fun onEnd(error: String?) = ui { finishHold(mode, error) }
+            override fun onEnd(error: String?) = ui {
+                // Seul le relâchement termine : si l'écoute s'arrête alors que la touche
+                // est encore tenue (sans erreur bloquante), on la relance en gardant le texte.
+                if (holding && curMode == mode && error == null) speech.start(tag, this)
+                else finishHold(mode, error)
+            }
         })
     }
 
     private fun endHold(mode: Mode) {
         if (curMode != mode) return
+        holding = false
         if (System.currentTimeMillis() - holdStart < 350) {
             speech.cancel(); resetHoldUi(); setStatus("Touche relâchée trop vite : maintiens-la pendant que tu parles."); return
         }
@@ -400,7 +408,7 @@ class MainActivity : Activity() {
 
     private fun resetHoldUi() {
         curButton?.let { it.text = curLabel; it.background = rounded(curColor, 18) }
-        curMode = null; curButton = null
+        curMode = null; curButton = null; holding = false
         if (::partial.isInitialized) partial.text = ""
     }
 

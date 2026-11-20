@@ -1,4 +1,4 @@
-# Bronet Dictée — Android (Samsung Galaxy Tab A11+) — révision 159
+# Bronet Dictée — Android (Samsung Galaxy Tab A11+) — révision 160
 
 Réécriture native de Bronet Dictée pour Android (la version Mac utilise MLX/PySide6, propres à Apple Silicon).
 Tout se pilote **à l'écran** : trois touches « maintenir pour parler » en bas, toujours visibles au-dessus du clavier virtuel.
