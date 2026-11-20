@@ -68,9 +68,7 @@ class MainActivity : Activity() {
     private lateinit var convSpeak: CheckBox
     private lateinit var autoCopy: CheckBox
     private lateinit var speakResult: CheckBox
-    private lateinit var journal: TextView
     private var toggleMode = false   // appuyer pour commencer, appuyer pour terminer
-    private var journalStart = 0L
     private var lastOutput = ""
     private var lastOutputLang: Lang? = null
 
@@ -91,7 +89,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("bronet", Context.MODE_PRIVATE)
         ChatGpt.init(this)
-        speech = Dictation(this).also { it.log = { m -> jlog(m) } }
+        speech = Dictation(this)
         voice = Voice(this)
         dictLang = Lang.byKey(prefs.getString("dict", null), "fr")
         trSrc = Lang.byKey(prefs.getString("trSrc", null), "fr")
@@ -196,7 +194,6 @@ class MainActivity : Activity() {
                 when (ev.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         v.parent?.requestDisallowInterceptTouchEvent(true)
-                        jlog("doigt posé sur la touche")
                         if (toggleMode) {
                             // Mode appuyer-appuyer : 1er appui = écoute, 2e appui = fin.
                             if (curMode == mode) endHold(mode) else beginHold(mode, this, text, color)
@@ -207,12 +204,10 @@ class MainActivity : Activity() {
                         true
                     }
                     MotionEvent.ACTION_UP -> {
-                        jlog("doigt levé (signalé par l'écran)")
                         if (!toggleMode) endHold(mode)
                         true
                     }
                     MotionEvent.ACTION_CANCEL -> {
-                        jlog("appui annulé par la tablette")
                         if (toggleMode) return@setOnTouchListener true
                         // La tablette a « volé » l'appui (geste système, bord d'écran…) alors que
                         // le doigt est peut-être encore posé : on continue d'écouter.
@@ -321,11 +316,6 @@ class MainActivity : Activity() {
             ),
         ))
 
-        journal = label("", 12f, color = GREY).apply { typeface = Typeface.MONOSPACE; setTextIsSelectable(true) }
-        col.addView(card(
-            label("Journal de la dernière écoute (diagnostic)", 14f, true), journal,
-            row(button("Copier le journal", GREY) { copy(journal.text.toString()) }),
-        ))
 
         mainScroll = ScrollView(this).apply {
             isFillViewport = false
@@ -431,8 +421,6 @@ class MainActivity : Activity() {
         voice.stop()
         curMode = mode; curButton = b; curLabel = text; curColor = color
         holdStart = System.currentTimeMillis(); buf.setLength(0)
-        journalStart = holdStart; journal.text = ""
-        jlog("début de l'écoute (${if (toggleMode) "mode appuyer-appuyer" else "maintenir"})")
         b.text = if (toggleMode) "● J'écoute…\ntouche pour terminer" else "● J'écoute…\nrelâche pour terminer"
         b.background = rounded(RED, 18)
         setStatus(endHint())
@@ -475,7 +463,6 @@ class MainActivity : Activity() {
             speech.cancel(); resetHoldUi(); setStatus("Touche relâchée trop vite : maintiens-la pendant que tu parles."); return
         }
         val secs = (System.currentTimeMillis() - holdStart) / 100 / 10.0
-        jlog("fin demandée par l'utilisateur")
         Toast.makeText(this, "Fin de l'écoute après ${"%.1f".format(secs)} s", Toast.LENGTH_SHORT).show()
         setStatus("Traitement…")
         if (speech.isActive()) speech.release() else finishHold(mode, null)
@@ -490,17 +477,9 @@ class MainActivity : Activity() {
     private fun endHint() = if (toggleMode) "● J'écoute… touche de nouveau la touche pour terminer."
         else "● J'écoute… relâche la touche pour terminer."
 
-    /** Ajoute une ligne horodatée au journal de diagnostic. */
-    private fun jlog(msg: String) = ui {
-        if (!::journal.isInitialized) return@ui
-        val t = if (journalStart == 0L) 0.0 else (System.currentTimeMillis() - journalStart) / 100 / 10.0
-        val lines = (journal.text.toString().lines().filter { it.isNotBlank() } + "+${"%.1f".format(t)} s  $msg").takeLast(80)
-        journal.text = lines.joinToString("\n")
-    }
 
     private fun finishHold(mode: Mode, error: String?) {
         if (curMode != mode) return
-        jlog("traitement du texte (${buf.length} caractères)")
         resetHoldUi()
         val text = buf.toString().trim()
         if (text.isEmpty()) { setStatus(error ?: "Aucune parole reconnue. Réessaie plus près du micro."); return }
