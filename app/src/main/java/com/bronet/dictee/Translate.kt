@@ -36,12 +36,43 @@ object LocalTranslator {
         status("Préparation du modèle local (téléchargement la première fois)…")
         c.downloadModelIfNeeded(DownloadConditions.Builder().build())
             .addOnSuccessListener {
-                c.translate(text)
-                    .addOnSuccessListener { done(it, null) }
-                    .addOnFailureListener { done(null, "Traduction locale impossible : ${it.message ?: "erreur"}") }
+                // Texte long : traduit morceau par morceau (ML Kit gère mal les longs passages).
+                val parts = chunks(text)
+                val out = ArrayList<String>(parts.size)
+                fun step(i: Int) {
+                    if (i == parts.size) { done(out.joinToString(" "), null); return }
+                    if (parts.size > 1) status("Traduction locale ${i + 1}/${parts.size}…")
+                    c.translate(parts[i])
+                        .addOnSuccessListener { out.add(it.trim()); step(i + 1) }
+                        .addOnFailureListener { done(null, "Traduction locale impossible : ${it.message ?: "erreur"}") }
+                }
+                step(0)
             }
             .addOnFailureListener { done(null, "Modèle local indisponible : vérifie le Wi-Fi pour le premier téléchargement.") }
     }
+}
+
+/** Découpe un texte en morceaux d'environ [max] caractères, aux fins de phrase si possible. */
+fun chunks(text: String, max: Int = 400): List<String> {
+    val sentences = text.trim().split(Regex("(?<=[.!?…。！？])\\s+")).filter { it.isNotBlank() }
+    val res = ArrayList<String>()
+    val cur = StringBuilder()
+    fun push() { if (cur.isNotBlank()) res.add(cur.toString().trim()); cur.setLength(0) }
+    for (s in sentences) {
+        if (s.length > max) {
+            // Phrase très longue sans ponctuation (dictée) : couper aux espaces.
+            push()
+            val words = s.split(Regex("\\s+"))
+            for (w in words) { if (cur.length + w.length + 1 > max) push(); if (cur.isNotEmpty()) cur.append(' '); cur.append(w) }
+            push()
+        } else {
+            if (cur.length + s.length + 1 > max) push()
+            if (cur.isNotEmpty()) cur.append(' ')
+            cur.append(s)
+        }
+    }
+    push()
+    return res.ifEmpty { listOf(text) }
 }
 
 /** Orthographe suisse de l'allemand standard. */
