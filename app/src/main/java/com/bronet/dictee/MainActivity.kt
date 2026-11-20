@@ -222,7 +222,8 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(14), dp(16), dp(10))
         }
         col.addView(label("Bronet Dictée", 26f, true))
-        col.addView(label("Android · révision 158", 13f, color = GREY))
+        val rev = try { packageManager.getPackageInfo(packageName, 0).versionName?.substringBefore('-') } catch (_: Exception) { null }
+        col.addView(label("Android · révision ${rev ?: "?"}", 13f, color = GREY))
 
         val gpt = Switch(this).apply {
             text = "Mode GPT (traduction par ChatGPT)"; isChecked = gptMode; textSize = 15f
