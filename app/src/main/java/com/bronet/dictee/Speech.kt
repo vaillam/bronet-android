@@ -36,6 +36,7 @@ class Dictation(private val ctx: Context) {
     private var lastPartial = ""
     private var failures = 0          // erreurs consécutives sans aucun texte
     private var lastStart = 0L
+    private var heard = false         // du texte a déjà été reconnu pendant cet appui
 
     fun available() = SpeechRecognizer.isRecognitionAvailable(ctx)
     fun isActive() = active
@@ -47,6 +48,7 @@ class Dictation(private val ctx: Context) {
         active = true
         released = false
         failures = 0
+        heard = false
         // Laisser au service le temps de libérer la session précédente.
         val since = SystemClock.elapsedRealtime() - lastStart
         if (since < 300) handler.postDelayed({ if (active && !released) begin() }, 300 - since)
@@ -172,6 +174,7 @@ class Dictation(private val ctx: Context) {
             if (t.isNotBlank()) {
                 lastPartial = t
                 failures = 0
+                heard = true
                 cb?.onPartial(t)
             }
         }
@@ -181,7 +184,7 @@ class Dictation(private val ctx: Context) {
             var t = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
             if (t.isBlank()) t = lastPartial
             lastPartial = ""
-            if (t.isNotBlank()) { failures = 0; cb?.onSegment(t.trim()) }
+            if (t.isNotBlank()) { failures = 0; heard = true; cb?.onSegment(t.trim()) }
             cb?.onPartial("")
             next()
         }
@@ -193,10 +196,15 @@ class Dictation(private val ctx: Context) {
                 SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
                     flushPartial(); next()
                 }
-                // Erreurs bloquantes : inutile de réessayer.
-                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS,
+                // Micro non autorisé : inutile de réessayer.
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> { flushPartial(); finish(message(error)) }
+                // Langue refusée : bloquant seulement si rien n'a encore été reconnu ;
+                // en pleine conversation, c'est un refus passager lors d'une relance.
                 SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
-                SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> { flushPartial(); finish(message(error)) }
+                SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> {
+                    flushPartial()
+                    if (heard) retry(error, message(error)) else finish(message(error))
+                }
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> {
                     try { rec?.cancel() } catch (_: Exception) {}
                     flushPartial(); retry(error, "Service vocal occupé")

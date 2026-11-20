@@ -10,9 +10,11 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.MotionEvent
@@ -75,6 +77,7 @@ class MainActivity : Activity() {
     private var curColor = BLUE
     private var holdStart = 0L
     private var holding = false   // la touche est physiquement tenue
+    private var holdCancelled = false   // appui annulé par le système, écoute maintenue
     private val buf = StringBuilder()
 
     private var accountDialog: AlertDialog? = null
@@ -189,9 +192,22 @@ class MainActivity : Activity() {
                 when (ev.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         v.parent?.requestDisallowInterceptTouchEvent(true)
-                        beginHold(mode, this, text, color); true
+                        // Après un appui interrompu par la tablette, on touche de nouveau pour terminer.
+                        if (curMode == mode && holdCancelled) holdCancelled = false
+                        else beginHold(mode, this, text, color)
+                        true
                     }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { endHold(mode); true }
+                    MotionEvent.ACTION_UP -> { endHold(mode); true }
+                    MotionEvent.ACTION_CANCEL -> {
+                        // La tablette a « volé » l'appui (geste système, bord d'écran…) alors que
+                        // le doigt est peut-être encore posé : on continue d'écouter.
+                        if (curMode == mode) {
+                            holdCancelled = true
+                            this.text = "● J'écoute…\ntouche pour terminer"
+                            setStatus("● J'écoute toujours (appui interrompu par la tablette) : touche la touche pour terminer.")
+                        }
+                        true
+                    }
                     else -> true
                 }
             }
@@ -290,6 +306,10 @@ class MainActivity : Activity() {
         mainBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(10), dp(8), dp(10), dp(8)); setBackgroundColor(Color.parseColor("#E6EAF2"))
+        }
+        // Pas de geste « retour » depuis les bords sur la barre de touches.
+        if (Build.VERSION.SDK_INT >= 29) mainBar.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+            v.systemGestureExclusionRects = listOf(Rect(0, 0, v.width, v.height))
         }
         listOf(
             Triple("1 · DICTER\nmaintenir et parler", BLUE, Mode.DICT),
@@ -395,7 +415,11 @@ class MainActivity : Activity() {
                 // Seul le relâchement termine : si l'écoute s'arrête alors que la touche
                 // est encore tenue (sans erreur bloquante), on la relance en gardant le texte.
                 if (holding && curMode == mode && error == null) speech.start(tag, this)
-                else finishHold(mode, error)
+                else {
+                    // Arrêt avant le relâchement : le dire clairement (le statut est ensuite remplacé).
+                    if (holding && error != null) Toast.makeText(this@MainActivity, "Écoute arrêtée : $error", Toast.LENGTH_LONG).show()
+                    finishHold(mode, error)
+                }
             }
         })
     }
@@ -412,7 +436,7 @@ class MainActivity : Activity() {
 
     private fun resetHoldUi() {
         curButton?.let { it.text = curLabel; it.background = rounded(curColor, 18) }
-        curMode = null; curButton = null; holding = false
+        curMode = null; curButton = null; holding = false; holdCancelled = false
         if (::partial.isInitialized) partial.text = ""
     }
 
