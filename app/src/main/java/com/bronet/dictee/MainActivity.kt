@@ -462,8 +462,6 @@ class MainActivity : Activity() {
         if (System.currentTimeMillis() - holdStart < 350) {
             speech.cancel(); resetHoldUi(); setStatus("Touche relâchée trop vite : maintiens-la pendant que tu parles."); return
         }
-        val secs = (System.currentTimeMillis() - holdStart) / 100 / 10.0
-        Toast.makeText(this, "Fin de l'écoute après ${"%.1f".format(secs)} s", Toast.LENGTH_SHORT).show()
         setStatus("Traitement…")
         if (speech.isActive()) speech.release() else finishHold(mode, null)
     }
