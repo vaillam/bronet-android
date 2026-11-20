@@ -413,14 +413,15 @@ class MainActivity : Activity() {
                 if (mode == Mode.DICT) appendDictation(text)
             }
             override fun onEnd(error: String?) = ui {
-                // Seul le relâchement termine : si l'écoute s'arrête alors que la touche
-                // est encore tenue (sans erreur bloquante), on la relance en gardant le texte.
-                if (holding && curMode == mode && error == null) speech.start(tag, this)
-                else {
-                    // Arrêt avant le relâchement : le dire clairement (le statut est ensuite remplacé).
-                    if (holding && error != null) Toast.makeText(this@MainActivity, "Écoute arrêtée : $error", Toast.LENGTH_LONG).show()
-                    finishHold(mode, error)
-                }
+                if (curMode != mode) return@ui
+                if (holding) {
+                    // Règle absolue : tant que le doigt est sur la touche, jamais de traduction.
+                    // Le service vocal s'est arrêté : on relance l'écoute en gardant le texte.
+                    val cb = this
+                    if (error != null) setStatus("⚠ $error — j'écoute encore, relâche la touche pour terminer.")
+                    mainBar.postDelayed({ if (holding && curMode == mode) speech.start(tag, cb) },
+                        if (error == null) 0L else 1500L)
+                } else finishHold(mode, error)
             }
         })
     }
@@ -431,8 +432,10 @@ class MainActivity : Activity() {
         if (System.currentTimeMillis() - holdStart < 350) {
             speech.cancel(); resetHoldUi(); setStatus("Touche relâchée trop vite : maintiens-la pendant que tu parles."); return
         }
+        val secs = (System.currentTimeMillis() - holdStart) / 100 / 10.0
+        Toast.makeText(this, "Fin de l'écoute : touche relâchée après ${"%.1f".format(secs)} s", Toast.LENGTH_SHORT).show()
         setStatus("Traitement…")
-        speech.release()
+        if (speech.isActive()) speech.release() else finishHold(mode, null)
     }
 
     private fun resetHoldUi() {
